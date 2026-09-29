@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Markdown 预览（离线版）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  textarea, #preview {
+    flex: 1; padding: 16px; margin: 0; border: none; outline: none;
+    overflow-y: auto; font-size: 15px; line-height: 1.6;
+  }
+  textarea {
+    border-right: 1px solid #ddd; resize: none;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  #preview h1, #preview h2 { border-bottom: 1px solid #eee; padding-bottom: .3em; }
+  #preview img { max-width: 100%; }
+  #preview code {
+    background: #f0f0f0; padding: 2px 5px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: .9em;
+  }
+  #preview pre code { background: none; padding: 0; }
+  #preview blockquote { margin: 0; padding: 0 1em; color: #555; border-left: 4px solid #ddd; }
+  #preview table { border-collapse: collapse; }
+  #preview th, #preview td { border: 1px solid #ddd; padding: 6px 12px; }
+  #preview th { background: #f6f8fa; }
+  #preview hr { border: none; border-top: 1px solid #ddd; }
+  #preview ul, #preview ol { padding-left: 1.5em; }
+  #preview li input[type=checkbox] { margin-right: .4em; }
+
+  /* ---- 代码块 + 复制按钮 ---- */
+  .code-block { position: relative; margin: 1em 0; }
+  .code-block pre {
+    margin: 0; padding: 12px; overflow-x: auto; border-radius: 6px;
+    background: #f6f8fa;
+  }
+  .copy-btn {
+    position: absolute; top: 6px; right: 6px;
+    padding: 3px 10px; font-size: 12px; line-height: 1.5;
+    color: #444; background: #fff;
+    border: 1px solid #d0d7de; border-radius: 5px;
+    cursor: pointer; opacity: .4;
+    transition: opacity .15s, background .15s;
+  }
+  .code-block:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { background: #f3f4f6; }
+  .copy-btn:active { background: #e8e8e8; }
+  .copy-btn.done { color: #1a7f37; border-color: #1a7f37; opacity: 1; }
+</style>
+</head>
+<body>
+
+<textarea id="input" placeholder="在这里写 Markdown..."></textarea>
+<div id="preview"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ---------------- 行内解析 ---------------- */
+  function inline(s) {
+    var escs = [];
+    s = s.replace(/\\([\\`*_{}\[\]()#+\-.!~>|])/g, function (m, c) {
+      escs.push(c);
+      return "\u0003" + (escs.length - 1) + "\u0003";
+    });
+
+    var codes = [];
+    s = s.replace(/`+([^`]+?)`+/g, function (m, c) {
+      codes.push("<code>" + esc(c.trim()) + "</code>");
+      return "\u0001" + (codes.length - 1) + "\u0001";
+    });
+
+    s = esc(s);
+
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g,
+      function (m, alt, url, t) {
+        return '<img src="' + url + '" alt="' + esc(alt) + '"' +
+               (t ? ' title="' + esc(t) + '"' : "") + ">";
+      });
+
+    s = s.replace(/\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g,
+      function (m, txt, url, t) {
+        return '<a href="' + url + '"' +
+               (t ? ' title="' + esc(t) + '"' : "") + ">" + txt + "</a>";
+      });
+
+    s = s.replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g, '<a href="$1">$1</a>');
+    s = s.replace(/&lt;([^\s@&]+@[^\s@&]+\.[^\s@&]+)&gt;/g, '<a href="mailto:$1">$1</a>');
+
+    s = s.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/___(.+?)___/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__(.+?)__/g, "<strong>$1</strong>");
+    s = s.replace(/\*([^*\n]+?)\*/g, "<em>$1</em>");
+    s = s.replace(/(^|[^\w])_([^_\n]+?)_(?=[^\w]|$)/g, "$1<em>$2</em>");
+    s = s.replace(/~~(.+?)~~/g, "<del>$1</del>");
+
+    s = s.replace(/ {2,}\n/g, "<br>");
+    s = s.replace(/\n/g, " ");
+
+    s = s.replace(/\u0001(\d+)\u0001/g, function (m, k) { return codes[+k]; });
+    s = s.replace(/\u0003(\d+)\u0003/g, function (m, k) { return escs[+k]; });
+
+    return s;
+  }
+
+  /* ---------------- 块级解析 ---------------- */
+  function parseBlocks(lines, codeBlocks) {
+    var out = "", i = 0, n = lines.length;
+
+    function isBlank(l) { return /^\s*$/.test(l); }
+    function isHR(l) { return /^\s*([-*_])\s*(\1\s*){2,}$/.test(l); }
+    function isDelim(l) {
+      return l.indexOf("-") !== -1 &&
+        /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(l);
+    }
+    function splitRow(l) {
+      var s = l.trim();
+      if (s.charAt(0) === "|") s = s.slice(1);
+      if (s.charAt(s.length - 1) === "|") s = s.slice(0, -1);
+      return s.split("|").map(function (c) { return c.trim(); });
+    }
+
+    while (i < n) {
+      var line = lines[i];
+
+      if (isBlank(line)) { i++; continue; }
+
+      var cb = line.match(/^\u0000CB(\d+)\u0000$/);
+      if (cb) { out += codeBlocks[+cb[1]]; i++; continue; }
+
+      var h = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (h) {
+        var lv = h[1].length;
+        out += "<h" + lv + ">" + inline(h[2]) + "</h" + lv + ">";
+        i++; continue;
+      }
+
+      if (i + 1 < n && !isBlank(line) && !isHR(line) &&
+          /^(=+|-+)\s*$/.test(lines[i + 1])) {
+        var lv2 = lines[i + 1].trim().charAt(0) === "=" ? 1 : 2;
+        out += "<h" + lv2 + ">" + inline(line.trim()) + "</h" + lv2 + ">";
+        i += 2; continue;
+      }
+
+      if (isHR(line)) { out += "<hr>"; i++; continue; }
+
+      if (/^\s*>/.test(line)) {
+        var qbuf = [];
+        while (i < n) {
+          if (/^\s*>/.test(lines[i])) {
+            qbuf.push(lines[i].replace(/^\s*>\s?/, ""));
+            i++;
+          } else if (isBlank(lines[i]) && i + 1 < n && /^\s*>/.test(lines[i + 1])) {
+            qbuf.push(""); i++;
+          } else break;
+        }
+        out += "<blockquote>" + parseBlocks(qbuf, codeBlocks) + "</blockquote>";
+        continue;
+      }
+
+      if (i + 1 < n && line.indexOf("|") !== -1 && isDelim(lines[i + 1])) {
+        var heads = splitRow(line);
+        var aligns = splitRow(lines[i + 1]).map(function (c) {
+          var l = c.charAt(0) === ":", r = c.charAt(c.length - 1) === ":";
+          if (l && r) return "center";
+          if (r) return "right";
+          if (l) return "left";
+          return "";
+        });
+        var html = "<table><thead><tr>";
+        heads.forEach(function (hd, k) {
+          html += "<th" + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : "") +
+                  ">" + inline(hd) + "</th>";
+        });
+        html += "</tr></thead><tbody>";
+        i += 2;
+        while (i < n && !isBlank(lines[i]) && lines[i].indexOf("|") !== -1) {
+          var cs = splitRow(lines[i]);
+          html += "<tr>";
+          for (var k = 0; k < heads.length; k++) {
+            html += "<td" + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : "") +
+                    ">" + inline(cs[k] || "") + "</td>";
+          }
+          html += "</tr>"; i++;
+        }
+        html += "</tbody></table>";
+        out += html; continue;
+      }
+
+      if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
+        var res = parseList(lines, i, codeBlocks);
+        out += res[0]; i = res[1];
+        continue;
+      }
+
+      var buf = [];
+      while (i < n) {
+        var L = lines[i];
+        if (isBlank(L)) break;
+        if (/^\u0000CB\d+\u0000$/.test(L)) break;
+        if (/^#{1,6}\s/.test(L)) break;
+        if (/^\s*>/.test(L)) break;
+        if (/^\s*([-*+]|\d+[.)])\s+/.test(L)) break;
+        if (isHR(L)) break;
+        if (i + 1 < n && L.indexOf("|") !== -1 && isDelim(lines[i + 1])) break;
+        buf.push(L); i++;
+      }
+      if (buf.length) out += "<p>" + inline(buf.join("\n")) + "</p>";
+      else i++;
+    }
+
+    return out;
+  }
+
+  /* ---------------- 列表解析 ---------------- */
+  function parseList(lines, start, codeBlocks) {
+    var first = lines[start].match(/^(\s*)([-*+]|\d+[.)])\s+/);
+    var baseIndent = first[1].length;
+    var ordered = /\d/.test(first[2]);
+    var startNum = ordered ? parseInt(first[2], 10) : 1;
+    var items = [], i = start, n = lines.length;
+
+    while (i < n) {
+      var line = lines[i];
+
+      if (/^\s*$/.test(line)) {
+        var j = i + 1;
+        while (j < n && /^\s*$/.test(lines[j])) j++;
+        if (j < n) {
+          var nm = lines[j].match(/^(\s*)([-*+]|\d+[.)])\s+/);
+          if (nm && nm[1].length === baseIndent) { i = j; continue; }
+        }
+        break;
+      }
+
+      var m = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (m) {
+        if (m[1].length === baseIndent) { items.push([m[3]]); i++; continue; }
+        if (m[1].length > baseIndent) {
+          if (items.length) items[items.length - 1].push(line.slice(baseIndent));
+          i++; continue;
+        }
+        break;
+      }
+
+      var ci = line.match(/^(\s*)/)[1].length;
+      if (ci > baseIndent && items.length) {
+        items[items.length - 1].push(line.slice(baseIndent));
+        i++; continue;
+      }
+      break;
+    }
+
+    var html = "";
+    items.forEach(function (itemLines) {
+      var content = itemLines.join("\n");
+      var box = "";
+      var tm = content.match(/^\[([ xX])\]\s+([\s\S]*)$/);
+      if (tm) {
+        box = '<input type="checkbox" disabled' +
+              (tm[1].toLowerCase() === "x" ? " checked" : "") + "> ";
+        content = tm[2];
+      }
+
+      var inner;
+      var hasBlock = /^[ \t]*([-*+]|\d+[.)])\s+/m.test(content) ||
+                     /^[ \t]*>/m.test(content) ||
+                     /\n\s*\n/.test(content);
+      if (hasBlock) {
+        inner = parseBlocks(content.split("\n"), codeBlocks);
+      } else {
+        inner = inline(content.replace(/\n/g, " ").trim());
+      }
+      html += "<li>" + box + inner + "</li>";
+    });
+
+    var tag = ordered ? "ol" : "ul";
+    var attr = (ordered && startNum !== 1) ? ' start="' + startNum + '"' : "";
+    return ["<" + tag + attr + ">" + html + "</" + tag + ">", i];
+  }
+
+  /* ---------------- 主入口 ---------------- */
+  function md(src) {
+    var codeBlocks = [];
+    src = src.replace(/\r\n?/g, "\n");
+
+    src = src.replace(/```([^\n]*)\n([\s\S]*?)```/g, function (m, lang, code) {
+      var l = lang.trim();
+      var cls = l ? ' class="language-' + esc(l) + '"' : "";
+      codeBlocks.push(
+        '<div class="code-block">' +
+          '<button class="copy-btn" type="button">复制</button>' +
+          '<pre><code' + cls + '>' + esc(code.replace(/\n$/, "")) + '</code></pre>' +
+        '</div>'
+      );
+      return "\n\u0000CB" + (codeBlocks.length - 1) + "\u0000\n";
+    });
+
+    return parseBlocks(src.split("\n"), codeBlocks);
+  }
+
+  /* ---------------- 复制 ---------------- */
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    // file:// 打开时的兜底
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error("copy failed"));
+    });
+  }
+
+  /* ---------------- 绑定 ---------------- */
+  var input = document.getElementById("input");
+  var preview = document.getElementById("preview");
+
+  function render() {
+    preview.innerHTML = md(input.value);
+  }
+
+  // 事件委托：按钮是每次重绘生成的，绑在容器上最省事
+  preview.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest(".copy-btn") : null;
+    if (!btn) return;
+
+    var wrap = btn.parentNode;
+    var codeEl = wrap.querySelector("code");
+    if (!codeEl) return;
+
+    copyText(codeEl.textContent).then(function () {
+      btn.textContent = "已复制";
+      btn.classList.add("done");
+      setTimeout(function () {
+        btn.textContent = "复制";
+        btn.classList.remove("done");
+      }, 1500);
+    }).catch(function () {
+      btn.textContent = "复制失败";
+      setTimeout(function () { btn.textContent = "复制"; }, 1500);
+    });
+  });
+
+  input.addEventListener("input", render);
+  render();
+})();
+</script>
+
+</body>
+</html>
